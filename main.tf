@@ -3,15 +3,33 @@
 ################################################################################
 
 module "eks" {
-  source = "../.."
 
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 19.0"
+
+  #Cluster primary inputs
   cluster_name                   = var.cluster_name
   cluster_version = var.cluster_version
+  cluster_endpoint_private_access = true
   cluster_endpoint_public_access = true
+
+
+  #Monitoring
+  cluster_enabled_log_types = var.enabled_cluster_log_types
+  create_cloudwatch_log_group = true
+  cloudwatch_log_group_retention_in_days = var.cloudwatch_log_group_retention_in_days
+
+  #Service account and Roles
+  enable_irsa = true
+
+
+  #Networking
   vpc_id                   = module.vpc.vpc_id
   subnet_ids               = module.vpc.private_subnets
   control_plane_subnet_ids = module.vpc.intra_subnets
 
+
+  #Cluster Addons
   cluster_addons = {
 
     coredns = {
@@ -28,6 +46,7 @@ module "eks" {
     }
   }
 
+
 ################################################################################
 # EKS Managed Node Groups
 ################################################################################
@@ -36,7 +55,7 @@ module "eks" {
   # EKS Managed Node Group(s)
   eks_managed_node_group_defaults = {
     ami_type       = "AL2_x86_64"
-    instance_types = ["m6i.large", "m5.large", "m5n.large", "m5zn.large"]
+    instance_types = ["t3.medium", "t3.large"]
 
     attach_cluster_primary_security_group = true
     vpc_security_group_ids                = [aws_security_group.additional.id]
@@ -46,58 +65,68 @@ module "eks" {
   }
 
 
-
+  #Node which use to deploy applications related workloads
   eks_managed_node_groups = {
-    blue = {}
-    green = {
+    app_node = {
+
+      min_size     = 1
+      max_size     = 10
+      desired_size = 1
+      
+      instance_types = ["t3.medium"]
+      capacity_type  = "ON_DEMAND"
+      labels = {
+        Environment = var.envirnoment
+        GithubRepo  = "helm_configs"
+      }
+
+      update_config = {
+        max_unavailable_percentage = 10 # or set `max_unavailable`
+      }
+
+      tags = {
+        NodeType = "System"
+      }
+
+
+    }
+
+
+
+
+    #Node which use to deploy system related workloads
+    system_node = {
       min_size     = 1
       max_size     = 10
       desired_size = 1
 
-      instance_types = ["t3.large"]
-      capacity_type  = "SPOT"
+      instance_types = ["t3.medium"]
+      capacity_type  = "ON_DEMAND"
       labels = {
-        Environment = "test"
+        Environment = var.envirnoment
         GithubRepo  = "terraform-aws-eks"
-        GithubOrg   = "terraform-aws-modules"
       }
-
+      
+      # Add taint to schedule only workload which tolarate 
       taints = {
         dedicated = {
           key    = "dedicated"
-          value  = "gpuGroup"
+          value  = "system"
           effect = "NO_SCHEDULE"
         }
       }
 
       update_config = {
-        max_unavailable_percentage = 33 # or set `max_unavailable`
+        max_unavailable_percentage = 10 # or set `max_unavailable`
       }
 
       tags = {
-        ExtraTag = "example"
+        NodeType = "System"
       }
     }
   }
-
 ################################################################################
-# EKS Encryption
-################################################################################
-
-  # External encryption key
-  create_kms_key = true
-  cluster_encryption_config = {
-    resources        = ["secrets"]
-    provider_key_arn = module.kms.key_arn
-  }
-
-  iam_role_additional_policies = {
-    additional = aws_iam_policy.additional.arn
-  }
-
-
-################################################################################
-# EKS Security
+# Cluster Security
 ################################################################################
 
   # Extend cluster security group rules
@@ -145,66 +174,48 @@ module "eks" {
 
 
 ################################################################################
+# EKS Encryption
+################################################################################
+
+  # External encryption key
+#   create_kms_key = true
+#   cluster_encryption_config = {
+#     resources        = ["secrets"]
+#     provider_key_arn = module.kms.key_arn
+#   }
+
+#   iam_role_additional_policies = {
+#     additional = aws_iam_policy.additional.arn
+#   }
+
+
+
+
+################################################################################
 # EKS Authenticaion
 ################################################################################
 
 
   # aws-auth configmap
-  manage_aws_auth_configmap = true
+#   manage_aws_auth_configmap = true
 
-  aws_auth_node_iam_role_arns_non_windows = [
-    module.eks_managed_node_group.iam_role_arn
-  ]
+#   aws_auth_node_iam_role_arns_non_windows = [
+#     module.eks_managed_node_group.iam_role_arn
+#   ]
 
 
-  aws_auth_roles = [
-    {
-      rolearn  = module.eks_managed_node_group.iam_role_arn
-      username = "system:node:{{EC2PrivateDNSName}}"
-      groups = [
-        "system:bootstrappers",
-        "system:nodes",
-      ]
-    }
-  ]
+#   aws_auth_roles = [
+#     {
+#       rolearn  = module.eks_managed_node_group.iam_role_arn
+#       username = "system:node:{{EC2PrivateDNSName}}"
+#       groups = [
+#         "system:bootstrappers",
+#         "system:nodes",
+#       ]
+#     }
+#   ]
 
   tags = local.tags
-}
-
-
-
-################################################################################
-# Sub-Module Usage on Existing/Separate Cluster
-################################################################################
-
-module "eks_managed_node_group" {
-  source = "../../modules/eks-managed-node-group"
-
-  name            = "separate-eks-mng"
-  cluster_name    = module.eks.cluster_name
-  cluster_version = module.eks.cluster_version
-
-  subnet_ids                        = module.vpc.private_subnets
-  cluster_primary_security_group_id = module.eks.cluster_primary_security_group_id
-  vpc_security_group_ids = [
-    module.eks.cluster_security_group_id,
-  ]
-
-  ami_type = "BOTTLEROCKET_x86_64"
-  platform = "bottlerocket"
-
-  # this will get added to what AWS provides
-  bootstrap_extra_args = <<-EOT
-    # extra args added
-    [settings.kernel]
-    lockdown = "integrity"
-
-    [settings.kubernetes.node-labels]
-    "label1" = "foo"
-    "label2" = "bar"
-  EOT
-
-  tags = merge(local.tags, { Separate = "eks-managed-node-group" })
 }
 
 
@@ -252,6 +263,7 @@ resource "aws_security_group" "additional" {
     to_port   = 22
     protocol  = "tcp"
     cidr_blocks = [
+      "0.0.0.0/0",
       "10.0.0.0/8",
       "172.16.0.0/12",
       "192.168.0.0/16",
@@ -259,23 +271,6 @@ resource "aws_security_group" "additional" {
   }
 
   tags = merge(local.tags, { Name = "${local.name}-additional" })
-}
-
-resource "aws_iam_policy" "additional" {
-  name = "${local.name}-additional"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = [
-          "ec2:Describe*",
-        ]
-        Effect   = "Allow"
-        Resource = "*"
-      },
-    ]
-  })
 }
 
 module "kms" {
