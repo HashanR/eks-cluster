@@ -1,7 +1,7 @@
 terraform {
   required_providers {
     aws = {
-      source = "hashicorp/aws"
+      source  = "hashicorp/aws"
       version = "4.48.0"
     }
   }
@@ -10,9 +10,6 @@ terraform {
 provider "aws" {
   region = "us-east-1"
 }
-
-
-
 
 provider "kubernetes" {
   host                   = module.eks.cluster_endpoint
